@@ -85,6 +85,8 @@ def __dot_add_nodes(dot: Digraph, grad_fn: torch.autograd.graph.Node, visited: s
 
     if hasattr(grad_fn, 'saved_tensors'):
         for item_val in grad_fn.saved_tensors:
+            if item_val is None:
+                continue
             dot.node(str(id(item_val)), __name_of_size(
                 item_val), fillcolor='orange')
             dot.edge(str(id(item_val)), str(id(grad_fn)), dir="none")

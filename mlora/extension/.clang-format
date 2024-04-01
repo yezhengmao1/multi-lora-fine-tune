@@ -1,0 +1,14 @@
+# Copyright (c) 2023 yezhengmao
+
+---
+Language: Cpp
+IndentWidth: 4
+AccessModifierOffset: -4
+EmptyLineBeforeAccessModifier: LogicalBlock
+MaxEmptyLinesToKeep: 1
+ColumnLimit: 90
+AllowShortBlocksOnASingleLine: Never
+AllowShortFunctionsOnASingleLine: None
+AllowShortLambdasOnASingleLine: None
+PointerAlignment: Right
+SortIncludes: false

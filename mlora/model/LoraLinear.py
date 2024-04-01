@@ -1,13 +1,13 @@
 from mlora.model.modelargs import MultiLoraBatchData
 from mlora.config import LoraConfig
 from mlora.profiler.profiler import set_backward_tracepoint, nvtx_range
+from mlora.model.LoraFunction import BatchLoraFunction, BatchLoraArgs
 
 import math
 import torch
-import torch.nn.functional as F
 import bitsandbytes
 
-from typing import Dict, Optional, Tuple
+from typing import Dict, Optional, Tuple, List
 
 
 class Lora(torch.nn.Module):
@@ -16,8 +16,8 @@ class Lora(torch.nn.Module):
 
         self.adapter_name_: str = adapter_name
 
-        self.lora_a_: torch.Tensor = None
-        self.lora_b_: torch.Tensor = None
+        self.lora_a_: torch.Tensor = None  # the shape is r, in_dim
+        self.lora_b_: torch.Tensor = None  # the shape is out_dim, r
 
         self.r_: int = 0
         self.alpha_: int = 0
@@ -29,16 +29,6 @@ class Lora(torch.nn.Module):
         self.alpha_ = alpha
         self.dropout_ = dropout
         self.scaling_ = alpha / r
-
-    def forward(self, data: torch.Tensor) -> torch.Tensor:
-        data_ = F.dropout(data, self.dropout_)
-
-        data_ = data_ @ self.lora_a_.transpose(0, 1)
-        data_ = data_ @ self.lora_b_.transpose(0, 1)
-
-        data_ = data_ * self.scaling_
-
-        return data_
 
 
 class Linear(torch.nn.Module):
@@ -109,6 +99,36 @@ class Linear(torch.nn.Module):
 
         self.enable_lora_ = True
 
+    def get_batch_lora_function_args(self, input_args: MultiLoraBatchData):
+        ret_args: List[BatchLoraArgs] = []
+        ret_tensors = ()
+
+        for batch_config in input_args.lora_batch_data_config_:
+            adapter_name = batch_config.adapter_name_
+            start_idx = batch_config.batch_start_idx_
+            end_idx = batch_config.batch_end_idx_
+
+            dropout = self.loras_[
+                adapter_name].dropout_ if adapter_name in self.loras_ else 0.0
+            scaling = self.loras_[
+                adapter_name].scaling_ if adapter_name in self.loras_ else 0.0
+
+            lora_a = self.loras_[
+                adapter_name].lora_a_ if adapter_name in self.loras_ else None
+            lora_b = self.loras_[
+                adapter_name].lora_b_ if adapter_name in self.loras_ else None
+
+            ret_args.append(BatchLoraArgs(
+                batch_start_index_=start_idx,
+                batch_end_index_=end_idx,
+                dropout_=dropout,
+                scaling_=scaling
+            ))
+
+            ret_tensors += (lora_a, lora_b)
+
+        return (ret_args,) + ret_tensors
+
     def forward(self, data: torch.Tensor, input_args: MultiLoraBatchData) -> torch.Tensor:
         # data shape is: batch_size * max_seq_len * dim
         # result = data @ self.weight_.transpose(0, 1)
@@ -119,25 +139,12 @@ class Linear(torch.nn.Module):
             result = self.weight_.forward(data)
         set_backward_tracepoint(result.grad_fn, "b_linear")
 
-        for lora_config in input_args.lora_batch_data_config_:
-            adapter_name = lora_config.adapter_name_
-            start_idx = lora_config.batch_start_idx_
-            end_idx = lora_config.batch_end_idx_
+        function_args = self.get_batch_lora_function_args(input_args)
+        if len(function_args[0]) == 0:
+            return result
 
-            if adapter_name == "" or adapter_name not in self.loras_:
-                continue
-
-            with nvtx_range(f"f_lora_{adapter_name}"):
-                lora_data = data[start_idx:end_idx]
-
-                # backward_tracepoint inside the forward function
-                lora_delta = self.loras_[adapter_name].forward(lora_data)
-
-                lora_range = torch.arange(
-                    start_idx, end_idx, step=1, device=lora_delta.device)
-                result.index_add_(dim=0, index=lora_range, source=lora_delta)
-
-            set_backward_tracepoint(
-                result.grad_fn, f"b_lora_{adapter_name}")
+        with nvtx_range("f_lora"):
+            result = BatchLoraFunction.apply(result, data, *function_args)
+        set_backward_tracepoint(result.grad_fn, "b_lora")
 
         return result
